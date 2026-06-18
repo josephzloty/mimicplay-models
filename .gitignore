@@ -1,0 +1,23 @@
+# Build artifacts — model packs are hosted on GitHub Releases (tag: model),
+# never committed to the repo. `dist/` holds the local export output + .tar.gz.
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# NeMo / HF caches that may land in the tree
+*.nemo
+.cache/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

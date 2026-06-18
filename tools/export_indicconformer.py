@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Export AI4Bharat IndicConformer to sherpa-onnx compatible ONNX format.
+Export speech-recognition models to sherpa-onnx compatible ONNX (int8) for MimicPlay.
+
+Two model families:
+  * AI4Bharat IndicConformer (hybrid CTC/RNNT, gated on HuggingFace) — 22 Indic languages.
+  * English NeMo Conformer-CTC (pure EncDecCTCModelBPE, public on NGC) — dual-engine path.
 
 Run this ONCE on your desktop (not on device). Outputs go to dist/ then upload
 to GitHub Releases so the app can download them on-demand.
@@ -13,21 +17,20 @@ Windows SSL note:
     pip-system-certs (uses the Windows certificate store with requests/urllib3).
 
 Usage:
-    python tools/export_indicconformer.py --lang te     # Telugu
-    python tools/export_indicconformer.py --lang ta     # Tamil
-    python tools/export_indicconformer.py --lang hi     # Hindi
-    python tools/export_indicconformer.py --all         # all three
+    python tools/export_indicconformer.py --lang te     # Telugu (Indic)
+    python tools/export_indicconformer.py --all         # all 22 Indic languages
+    python tools/export_indicconformer.py --english     # English Conformer-CTC (dual-engine)
 
-Output structure per language (e.g. te):
-    dist/indicconformer-te/
-        model.onnx          # fp32 (intermediate, used to produce int8)
-        model.int8.onnx     # int8 quantized — upload this to GitHub Releases
-        tokens.txt          # vocabulary
+Output structure (e.g. Telugu / English):
+    dist/indicconformer-te/        dist/english-conformer-ctc/
+        model.onnx                     model.onnx          # fp32 intermediate
+        model.int8.onnx                model.int8.onnx     # upload this
+        tokens.txt                     tokens.txt
 
 After export:
-    1. Verify with: python tools/export_indicconformer.py --verify te
-    2. Create a tar.gz: tar -czf indicconformer-te-int8.tar.gz -C dist/indicconformer-te model.int8.onnx tokens.txt
-    3. Upload to GitHub Releases as: indicconformer-<lang>-int8.tar.gz
+    Indic:   --verify te   then  --lang te --pack   -> indicconformer-<lang>-int8.tar.gz
+    English: --verify-english  then  --english --pack  -> english-conformer-ctc-int8.tar.gz
+    Upload the .tar.gz to GitHub Releases (tag: model) in this repo.
 """
 
 import argparse
@@ -72,6 +75,14 @@ MODELS = {
 
 ALL_LANG_CODES = sorted(LANGUAGE_NAMES.keys())
 
+# ── English (dual-engine) ─────────────────────────────────────────────────────
+# NeMo English Conformer-CTC is a pure EncDecCTCModelBPE, public on NGC (no HF
+# gating). The app downloads this pack under the "en_ctc" key; the archive name
+# MUST match ModelDownloadManager.enCtcUrl() in the app repo.
+EN_MODEL_DEFAULT = "stt_en_conformer_ctc_small"   # ~13M params; on-device friendly
+EN_OUT_NAME      = "english-conformer-ctc"
+EN_ARCHIVE_NAME  = "english-conformer-ctc-int8.tar.gz"
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def check_imports():
@@ -114,7 +125,8 @@ def hf_login(token: str | None):
             sys.exit(1)
 
 
-def add_sherpa_onnx_metadata(onnx_path: Path, vocab_size: int, subsampling_factor: int):
+def add_sherpa_onnx_metadata(onnx_path: Path, vocab_size: int, subsampling_factor: int,
+                             comment: str = "ai4bharat indicconformer (CTC branch) via tools/export_indicconformer.py"):
     """Embed the ONNX metadata sherpa-onnx's native NeMo-CTC loader requires.
 
     sherpa-onnx does NOT just run a generic NeMo ONNX export — its C++ loader
@@ -137,7 +149,7 @@ def add_sherpa_onnx_metadata(onnx_path: Path, vocab_size: int, subsampling_facto
         "model_type": "EncDecCTCModelBPE",
         "version": "1",
         "model_author": "nemo",
-        "comment": "ai4bharat indicconformer (CTC branch) via tools/export_indicconformer.py",
+        "comment": comment,
     }
     added = []
     for key, value in meta_data.items():
@@ -310,7 +322,110 @@ def export_language(lang: str, dist_dir: Path, opset: int = 14):
     return out_dir
 
 
+def export_english(dist_dir: Path, model_name: str = EN_MODEL_DEFAULT, opset: int = 14):
+    """Export an English NeMo Conformer-CTC model for the dual-engine path.
+
+    Unlike IndicConformer (a hybrid CTC/RNNT model needing config patching and a
+    HuggingFace token), NeMo's English Conformer-CTC models are pure
+    EncDecCTCModelBPE and load straight from NGC — no gating, no aggregate
+    tokenizer, no config surgery. Produces the `english-conformer-ctc-int8.tar.gz`
+    pack the app downloads under the `en_ctc` key (ModelDownloadManager.enCtcUrl()).
+
+    NOTE: --en-model must be a *BPE* CTC checkpoint (EncDecCTCModelBPE), e.g.
+    stt_en_conformer_ctc_small / _medium / _large.
+    """
+    import nemo.collections.asr as nemo_asr
+
+    out_dir = dist_dir / EN_OUT_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    onnx_fp32_path = out_dir / "model.onnx"
+    onnx_int8_path = out_dir / "model.int8.onnx"
+    tokens_path = out_dir / "tokens.txt"
+    comment = "english nemo conformer-ctc via tools/export_indicconformer.py --english"
+
+    print(f"\n[English] Loading NeMo Conformer-CTC: {model_name}")
+    print("  (first download is cached in NeMo's model cache / ~/.cache)")
+    model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained(model_name)
+    model.eval()
+    print(f"  Loaded (pure CTC). vocab size w/ blank: {model.decoder.num_classes_with_blank}")
+
+    # ── tokens.txt ────────────────────────────────────────────────────────────
+    if not tokens_path.exists():
+        print(f"  Writing tokens.txt -> {tokens_path}")
+        tokenizer = getattr(model, "tokenizer", None)
+        vocab = getattr(tokenizer, "vocab", None) if tokenizer is not None else None
+        if isinstance(vocab, dict):
+            sorted_vocab = [t for t, _ in sorted(vocab.items(), key=lambda x: x[1])]
+        elif vocab is not None:
+            sorted_vocab = list(vocab)
+        else:
+            sorted_vocab = list(model.decoder.vocabulary)  # fallback
+        blank_id = model.decoder.num_classes_with_blank - 1
+        with open(tokens_path, "w", encoding="utf-8") as f:
+            for i, token in enumerate(sorted_vocab):
+                f.write(f"{token} {i}\n")
+            if "<blk>" not in sorted_vocab and "<blank>" not in sorted_vocab:
+                f.write(f"<blk> {blank_id}\n")
+        print(f"  Tokens: {len(sorted_vocab)} entries (blank_id={blank_id})")
+    else:
+        print("  tokens.txt already exists, skipping")
+
+    # ── fp32 ONNX ─────────────────────────────────────────────────────────────
+    if not onnx_fp32_path.exists():
+        print(f"  Exporting fp32 ONNX (opset {opset}) -> {onnx_fp32_path}")
+        model.export(str(onnx_fp32_path), onnx_opset_version=opset, check_trace=False)
+        print(f"  fp32 size: {onnx_fp32_path.stat().st_size / 1e6:.1f} MB")
+    else:
+        print("  model.onnx already exists, skipping fp32 export")
+
+    # subsampling_factor: Conformer-CTC = 4; FastConformer = 8.
+    try:
+        subsampling_factor = int(model.cfg.encoder.subsampling_factor)
+    except Exception:
+        subsampling_factor = 4
+    vocab_size = sum(1 for _ in open(tokens_path, encoding="utf-8"))
+    print(f"  sherpa-onnx metadata: vocab_size={vocab_size}, subsampling_factor={subsampling_factor}")
+    add_sherpa_onnx_metadata(onnx_fp32_path, vocab_size, subsampling_factor, comment=comment)
+
+    # ── int8 ──────────────────────────────────────────────────────────────────
+    if not onnx_int8_path.exists():
+        print(f"  Quantizing to int8 -> {onnx_int8_path}")
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+        import shutil, tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_in = Path(tmpdir) / "model.onnx"
+            tmp_out = Path(tmpdir) / "model.int8.onnx"
+            shutil.copy2(onnx_fp32_path, tmp_in)
+            quantize_dynamic(model_input=str(tmp_in), model_output=str(tmp_out),
+                             weight_type=QuantType.QInt8)
+            shutil.copy2(tmp_out, onnx_int8_path)
+        int8_mb = onnx_int8_path.stat().st_size / 1e6
+        fp32_mb = onnx_fp32_path.stat().st_size / 1e6
+        print(f"  int8 size: {int8_mb:.1f} MB (was {fp32_mb:.1f} MB fp32, "
+              f"{100*(fp32_mb-int8_mb)/fp32_mb:.0f}% reduction)")
+    else:
+        print("  model.int8.onnx already exists, skipping quantization")
+
+    # Re-stamp int8 (quantize_dynamic may drop metadata_props).
+    add_sherpa_onnx_metadata(onnx_int8_path, vocab_size, subsampling_factor, comment=comment)
+
+    print(f"\n  [OK] English complete -> {out_dir}/")
+    print(f"      model.int8.onnx: {onnx_int8_path.stat().st_size / 1e6:.1f} MB")
+    print(f"      tokens.txt:      {tokens_path.stat().st_size / 1024:.1f} KB")
+    return out_dir
+
+
 def verify_language(lang: str, dist_dir: Path, test_wav: str | None = None):
+    """Verify an exported Indic model (thin wrapper over _verify_onnx)."""
+    _verify_onnx(dist_dir / f"indicconformer-{lang}", LANGUAGE_NAMES[lang], test_wav)
+
+
+def verify_english(dist_dir: Path):
+    """Verify the exported English Conformer-CTC pack."""
+    _verify_onnx(dist_dir / EN_OUT_NAME, "English")
+
+
+def _verify_onnx(out_dir: Path, label: str, test_wav: str | None = None):
     """Sanity-check an exported model: metadata present, graph loads, a
     correctly-ranked forward pass runs without error.
 
@@ -328,7 +443,6 @@ def verify_language(lang: str, dist_dir: Path, test_wav: str | None = None):
     import onnxruntime as ort
     import numpy as np
 
-    out_dir = dist_dir / f"indicconformer-{lang}"
     onnx_path = out_dir / "model.int8.onnx"
     tokens_path = out_dir / "tokens.txt"
 
@@ -336,7 +450,7 @@ def verify_language(lang: str, dist_dir: Path, test_wav: str | None = None):
         print(f"[ERROR] {onnx_path} not found. Run export first.")
         sys.exit(1)
 
-    print(f"\n[{LANGUAGE_NAMES[lang]}] Verifying {onnx_path}")
+    print(f"\n[{label}] Verifying {onnx_path}")
 
     # ── Metadata check (this is what sherpa-onnx actually reads at load time) ──
     import onnx as onnx_lib
@@ -425,6 +539,21 @@ def make_archive(lang: str, dist_dir: Path):
     print(f"  Upload to GitHub Releases as: {archive_name}")
 
 
+def make_english_archive(dist_dir: Path):
+    """Package the English pack into english-conformer-ctc-int8.tar.gz."""
+    out_dir = dist_dir / EN_OUT_NAME
+    archive_path = dist_dir / EN_ARCHIVE_NAME
+
+    print(f"\n[English] Packing -> {archive_path}")
+    subprocess.run(
+        ["tar", "-czf", str(archive_path), "-C", str(out_dir),
+         "model.int8.onnx", "tokens.txt"],
+        check=True
+    )
+    print(f"  Archive: {archive_path.stat().st_size / 1e6:.1f} MB")
+    print(f"  Upload to GitHub Releases as: {EN_ARCHIVE_NAME}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -433,11 +562,18 @@ def main():
     )
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--lang", choices=ALL_LANG_CODES,
-                       help="Export a single language (e.g. te, ta, hi, bn, kn, ...)")
+                       help="Export a single Indic language (e.g. te, ta, hi, bn, kn, ...)")
     group.add_argument("--all", action="store_true",
-                       help="Export all 22 languages")
+                       help="Export all 22 Indic languages")
+    parser.add_argument("--english", action="store_true",
+                        help="Export the English Conformer-CTC model (dual-engine). "
+                             "Combinable with --lang/--all.")
+    parser.add_argument("--en-model", metavar="NAME", default=EN_MODEL_DEFAULT,
+                        help=f"English NeMo BPE-CTC checkpoint (default: {EN_MODEL_DEFAULT})")
     parser.add_argument("--verify", metavar="LANG", choices=ALL_LANG_CODES,
-                        help="Verify an already-exported model (optional WAV via --wav)")
+                        help="Verify an already-exported Indic model (optional WAV via --wav)")
+    parser.add_argument("--verify-english", action="store_true",
+                        help="Verify the already-exported English model")
     parser.add_argument("--wav", metavar="PATH",
                         help="Test WAV (16kHz mono) for --verify; defaults to synthetic tone")
     parser.add_argument("--pack", action="store_true",
@@ -448,7 +584,7 @@ def main():
                         help="ONNX opset version (default: 14)")
     parser.add_argument("--hf-token", metavar="TOKEN",
                         help="HuggingFace access token (or set HF_TOKEN env var). "
-                             "Required for gated AI4Bharat models.")
+                             "Required for gated AI4Bharat models (not for --english).")
 
     args = parser.parse_args()
     dist_dir = Path(args.dist)
@@ -457,25 +593,41 @@ def main():
         check_imports()
         verify_language(args.verify, dist_dir, args.wav)
         return
+    if args.verify_english:
+        check_imports()
+        verify_english(dist_dir)
+        return
 
-    if not args.lang and not args.all:
-        parser.error("one of --lang, --all, or --verify is required")
+    if not (args.lang or args.all or args.english):
+        parser.error("one of --lang, --all, --english, --verify, or --verify-english is required")
 
     check_imports()
-    hf_login(args.hf_token)
 
-    langs = list(MODELS.keys()) if args.all else [args.lang]
-    for lang in langs:
-        export_language(lang, dist_dir, opset=args.opset)
+    indic_langs = list(MODELS.keys()) if args.all else ([args.lang] if args.lang else [])
+
+    if indic_langs:
+        hf_login(args.hf_token)   # only the gated AI4Bharat models need this
+        for lang in indic_langs:
+            export_language(lang, dist_dir, opset=args.opset)
+            if args.pack:
+                make_archive(lang, dist_dir)
+
+    if args.english:
+        export_english(dist_dir, model_name=args.en_model, opset=args.opset)
         if args.pack:
-            make_archive(lang, dist_dir)
+            make_english_archive(dist_dir)
 
     print("\n-- Next steps ---------------------------------------------------")
-    for lang in langs:
+    for lang in indic_langs:
         print(f"  1. Verify:  python tools/export_indicconformer.py --verify {lang} "
               f"--wav test_fixtures/audio/{LANGUAGE_NAMES[lang].lower()}_hello.wav")
         print(f"  2. Pack:    python tools/export_indicconformer.py --lang {lang} --pack")
         print(f"  3. Upload:  dist/indicconformer-{lang}-int8.tar.gz  -> GitHub Releases")
+    if args.english:
+        print(f"  English:")
+        print(f"  1. Verify:  python tools/export_indicconformer.py --verify-english")
+        print(f"  2. Pack:    python tools/export_indicconformer.py --english --pack")
+        print(f"  3. Upload:  dist/{EN_ARCHIVE_NAME}  -> GitHub Releases (tag: model)")
     print()
 
 
