@@ -13,10 +13,10 @@ Windows SSL note:
     pip-system-certs (uses the Windows certificate store with requests/urllib3).
 
 Usage:
-    python scripts/export_indicconformer.py --lang te     # Telugu
-    python scripts/export_indicconformer.py --lang ta     # Tamil
-    python scripts/export_indicconformer.py --lang hi     # Hindi
-    python scripts/export_indicconformer.py --all         # all three
+    python tools/export_indicconformer.py --lang te     # Telugu
+    python tools/export_indicconformer.py --lang ta     # Tamil
+    python tools/export_indicconformer.py --lang hi     # Hindi
+    python tools/export_indicconformer.py --all         # all three
 
 Output structure per language (e.g. te):
     dist/indicconformer-te/
@@ -25,7 +25,7 @@ Output structure per language (e.g. te):
         tokens.txt          # vocabulary
 
 After export:
-    1. Verify with: python scripts/export_indicconformer.py --verify te
+    1. Verify with: python tools/export_indicconformer.py --verify te
     2. Create a tar.gz: tar -czf indicconformer-te-int8.tar.gz -C dist/indicconformer-te model.int8.onnx tokens.txt
     3. Upload to GitHub Releases as: indicconformer-<lang>-int8.tar.gz
 """
@@ -137,7 +137,7 @@ def add_sherpa_onnx_metadata(onnx_path: Path, vocab_size: int, subsampling_facto
         "model_type": "EncDecCTCModelBPE",
         "version": "1",
         "model_author": "nemo",
-        "comment": "ai4bharat indicconformer (CTC branch) via scripts/export_indicconformer.py",
+        "comment": "ai4bharat indicconformer (CTC branch) via tools/export_indicconformer.py",
     }
     added = []
     for key, value in meta_data.items():
@@ -472,9 +472,9 @@ def main():
 
     print("\n-- Next steps ---------------------------------------------------")
     for lang in langs:
-        print(f"  1. Verify:  python scripts/export_indicconformer.py --verify {lang} "
+        print(f"  1. Verify:  python tools/export_indicconformer.py --verify {lang} "
               f"--wav test_fixtures/audio/{LANGUAGE_NAMES[lang].lower()}_hello.wav")
-        print(f"  2. Pack:    python scripts/export_indicconformer.py --lang {lang} --pack")
+        print(f"  2. Pack:    python tools/export_indicconformer.py --lang {lang} --pack")
         print(f"  3. Upload:  dist/indicconformer-{lang}-int8.tar.gz  -> GitHub Releases")
     print()
 
